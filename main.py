@@ -1,4 +1,5 @@
 import os
+import asyncio
 import httpx
 import xml.etree.ElementTree as ET
 from fastapi import FastAPI, Query
@@ -123,35 +124,125 @@ TORRENT_CAPS = """<?xml version="1.0" encoding="UTF-8"?>
 </caps>"""
 
 
-async def prowlarr_search(params: dict) -> list[dict]:
-    async with httpx.AsyncClient(timeout=60) as client:
+async def get_prowlarr_indexers(client: httpx.AsyncClient) -> list[dict]:
+    resp = await client.get(
+        f"{PROWLARR_URL}/api/v1/indexer",
+        headers={"X-Api-Key": PROWLARR_API_KEY},
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def search_indexer(client: httpx.AsyncClient, indexer_id: int, params: dict) -> list[dict]:
+    try:
         resp = await client.get(
-            f"{PROWLARR_URL}/api/v1/search",
-            params=params,
-            headers={"X-Api-Key": PROWLARR_API_KEY},
+            f"{PROWLARR_URL}/api/v1/indexer/{indexer_id}/newznab",
+            params={**params, "apikey": PROWLARR_API_KEY},
         )
-        resp.raise_for_status()
-        return resp.json()
+        if resp.status_code != 200:
+            return []
+        root = ET.fromstring(resp.text)
+        items = []
+        for entry in root.findall(".//item"):
+            title = entry.findtext("title") or ""
+            download_url = entry.findtext("link") or ""
+            pub_date = entry.findtext("pubDate") or ""
+            size = 0
+            guid = entry.findtext("guid") or download_url
+            protocol = "usenet"
+            magnet_url = ""
+            seeders = None
+            imdb_id = None
+            tvdb_id = None
+            categories = []
+
+            enclosure = entry.find("enclosure")
+            if enclosure is not None:
+                url = enclosure.get("url", "")
+                if url:
+                    download_url = url
+                size = int(enclosure.get("length", 0) or 0)
+                if enclosure.get("type", "") == "application/x-bittorrent":
+                    protocol = "torrent"
+
+            for attr_el in entry.findall("{http://www.newznab.com/DTD/2010/feeds/attributes/}attr"):
+                name = attr_el.get("name", "")
+                value = attr_el.get("value", "")
+                if name == "size":
+                    size = int(value or 0)
+                elif name == "seeders":
+                    seeders = int(value or 0)
+                    protocol = "torrent"
+                elif name == "magneturl":
+                    magnet_url = value
+                    protocol = "torrent"
+                elif name == "imdb":
+                    imdb_id = value
+                elif name == "tvdbid":
+                    tvdb_id = value
+                elif name == "category":
+                    try:
+                        categories.append({"id": int(value)})
+                    except ValueError:
+                        pass
+
+            for attr_el in entry.findall("{http://torznab.com/schemas/2015/feed}attr"):
+                name = attr_el.get("name", "")
+                value = attr_el.get("value", "")
+                if name == "seeders":
+                    seeders = int(value or 0)
+                    protocol = "torrent"
+                elif name == "magneturl":
+                    magnet_url = value
+                    protocol = "torrent"
+
+            if download_url.endswith(".torrent") or "magnet:" in download_url:
+                protocol = "torrent"
+
+            items.append({
+                "title": title,
+                "downloadUrl": magnet_url if magnet_url and not download_url else download_url,
+                "publishDate": pub_date,
+                "size": size,
+                "guid": guid,
+                "protocol": protocol,
+                "seeders": seeders,
+                "magnetUrl": magnet_url,
+                "imdbId": imdb_id,
+                "tvdbId": tvdb_id,
+                "categories": categories,
+                "age": None,
+            })
+        return items
+    except Exception:
+        return []
 
 
-def build_prowlarr_params(t, q, imdbid, tvdbid, season, ep, cat) -> dict:
-    params: dict = {}
+async def prowlarr_search(newznab_params: dict) -> list[dict]:
+    async with httpx.AsyncClient(timeout=60) as client:
+        indexers = await get_prowlarr_indexers(client)
+        tasks = [search_indexer(client, idx["id"], newznab_params) for idx in indexers if idx.get("enable")]
+        results = await asyncio.gather(*tasks)
+        all_items = []
+        for r in results:
+            all_items.extend(r)
+        return all_items
+
+
+def build_newznab_params(t, q, imdbid, tvdbid, season, ep, cat) -> dict:
+    params: dict = {"t": t}
     if q:
-        params["query"] = q
+        params["q"] = q
     if imdbid:
-        params["imdbId"] = imdbid.lstrip("tt")
+        params["imdbid"] = imdbid
     if tvdbid:
-        params["tvdbId"] = tvdbid
+        params["tvdbid"] = tvdbid
     if season:
         params["season"] = season
     if ep:
-        params["episode"] = ep
+        params["ep"] = ep
     if cat:
-        params["categories"] = cat
-    if t == "movie":
-        params.setdefault("categories", "2000")
-    if t == "tvsearch":
-        params.setdefault("categories", "5000")
+        params["cat"] = cat
     return params
 
 
@@ -170,7 +261,7 @@ async def usenet(
         return Response(content=USENET_CAPS, media_type="application/xml")
 
     if t in ("search", "movie", "tvsearch"):
-        items = await prowlarr_search(build_prowlarr_params(t, q, imdbid, tvdbid, season, ep, cat))
+        items = await prowlarr_search(build_newznab_params(t, q, imdbid, tvdbid, season, ep, cat))
         items = process_usenet(items)
         return Response(content=build_xml(items, "newznab"), media_type="application/rss+xml")
 
@@ -192,7 +283,7 @@ async def torrent(
         return Response(content=TORRENT_CAPS, media_type="application/xml")
 
     if t in ("search", "movie", "tvsearch"):
-        items = await prowlarr_search(build_prowlarr_params(t, q, imdbid, tvdbid, season, ep, cat))
+        items = await prowlarr_search(build_newznab_params(t, q, imdbid, tvdbid, season, ep, cat))
         items = process_torrent(items)
         return Response(content=build_xml(items, "torznab"), media_type="application/rss+xml")
 
