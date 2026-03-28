@@ -1,8 +1,6 @@
 import os
 import httpx
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from fastapi import FastAPI, Query
 from fastapi.responses import Response
 
@@ -20,14 +18,6 @@ def tag_title(title: str, tag: str) -> str:
     return f"{title} {tag}"
 
 
-def age_days(pub_date_str: str) -> float | None:
-    try:
-        dt = parsedate_to_datetime(pub_date_str)
-        return (datetime.now(timezone.utc) - dt).total_seconds() / 86400
-    except Exception:
-        return None
-
-
 def is_torrent(item: dict) -> bool:
     return (
         item.get("downloadUrl", "").endswith(".torrent")
@@ -41,7 +31,7 @@ def process_usenet(items: list[dict]) -> list[dict]:
     for item in items:
         if is_torrent(item):
             continue
-        age = age_days(item.get("publishDate", ""))
+        age = item.get("age")
         if age is not None and age <= FRESH_DAYS:
             item["title"] = tag_title(item["title"], FRESH_TAG)
         result.append(item)
@@ -90,7 +80,7 @@ def build_xml(items: list[dict], ns: str = "newznab") -> str:
             a.set("value", str(value))
 
         if item.get("categories"):
-            attr("category", item["categories"][0])
+            attr("category", item["categories"][0]["id"])
         attr("size", str(item.get("size", 0)))
         if item.get("imdbId"):
             attr("imdb", str(item["imdbId"]).lstrip("tt"))
