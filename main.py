@@ -2,6 +2,8 @@ import os
 import asyncio
 import httpx
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from fastapi import FastAPI, Query
 from fastapi.responses import Response
 
@@ -17,6 +19,14 @@ API_KEY = os.getenv("API_KEY", "idiotarr")
 
 def tag_title(title: str, tag: str) -> str:
     return f"{title} {tag}"
+
+
+def _age_days(pub_date_str: str) -> float | None:
+    try:
+        dt = parsedate_to_datetime(pub_date_str)
+        return (datetime.now(timezone.utc) - dt).total_seconds() / 86400
+    except Exception:
+        return None
 
 
 def is_torrent(item: dict) -> bool:
@@ -211,7 +221,7 @@ async def search_indexer(client: httpx.AsyncClient, indexer_id: int, params: dic
                 "imdbId": imdb_id,
                 "tvdbId": tvdb_id,
                 "categories": categories,
-                "age": None,
+                "age": _age_days(pub_date),
             })
         return items
     except Exception:
