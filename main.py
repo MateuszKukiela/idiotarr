@@ -109,7 +109,8 @@ async def prowlarr_search(params: dict) -> list[dict]:
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.get(
             f"{PROWLARR_URL}/api/v1/search",
-            params={**params, "apikey": PROWLARR_API_KEY},
+            params=params,
+            headers={"X-Api-Key": PROWLARR_API_KEY},
         )
         resp.raise_for_status()
         return resp.json()
