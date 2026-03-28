@@ -12,6 +12,7 @@ PROWLARR_URL = os.environ["PROWLARR_URL"].rstrip("/")
 PROWLARR_API_KEY = os.environ["PROWLARR_API_KEY"]
 FRESH_DAYS = int(os.getenv("FRESH_DAYS", "30"))
 FRESH_TAG = os.getenv("FRESH_TAG", "NZB-FRESH")
+TORRENT_TAG = os.getenv("TORRENT_TAG", "TORRENT-LAST-RESORT")
 API_KEY = os.getenv("API_KEY", "idiotarr")
 
 
@@ -28,21 +29,19 @@ def age_days(pub_date_str: str) -> float | None:
 
 
 def process_results(items: list[dict]) -> list[dict]:
-    result = []
     for item in items:
         is_torrent = item.get("downloadUrl", "").endswith(".torrent") \
             or item.get("protocol", "") == "torrent" \
             or "magnet:" in item.get("downloadUrl", "")
 
         if is_torrent:
-            continue
+            item["title"] = tag_title(item["title"], TORRENT_TAG)
+        else:
+            age = age_days(item.get("publishDate", ""))
+            if age is not None and age <= FRESH_DAYS:
+                item["title"] = tag_title(item["title"], FRESH_TAG)
 
-        age = age_days(item.get("publishDate", ""))
-        if age is not None and age <= FRESH_DAYS:
-            item["title"] = tag_title(item["title"], FRESH_TAG)
-
-        result.append(item)
-    return result
+    return items
 
 
 def build_xml(items: list[dict], search_type: str = "search") -> str:
