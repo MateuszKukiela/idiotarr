@@ -11,22 +11,37 @@ app = FastAPI()
 
 PROWLARR_URL = os.environ["PROWLARR_URL"].rstrip("/")
 PROWLARR_API_KEY = os.environ["PROWLARR_API_KEY"]
-FRESH_DAYS = int(os.getenv("FRESH_DAYS", "30"))
-FRESH_TAG = os.getenv("FRESH_TAG", "NZB-FRESH")
 TORRENT_TAG = os.getenv("TORRENT_TAG", "TORRENT-LAST-RESORT")
 API_KEY = os.getenv("API_KEY", "idiotarr")
+
+# Tier system: list of (max_days, tag) sorted ascending by days.
+# An NZB gets the tag of the first tier whose threshold it falls under.
+# Configurable via TIER_DAYS and TIER_TAGS env vars (comma-separated, same length).
+_tier_days = [int(x) for x in os.getenv("TIER_DAYS", "30,60,90,365").split(",")]
+_tier_tags = os.getenv("TIER_TAGS", "NZB-FRESH-1M,NZB-FRESH-2M,NZB-FRESH-3M,NZB-FRESH-1Y").split(",")
+TIERS = list(zip(_tier_days, _tier_tags))  # [(30, "NZB-FRESH-1M"), (60, "NZB-FRESH-2M"), ...]
 
 
 def tag_title(title: str, tag: str) -> str:
     return f"{title} {tag}"
 
 
-def _age_days(pub_date_str: str) -> float | None:
+def _age_days_from_pubdate(pub_date_str: str) -> float | None:
     try:
         dt = parsedate_to_datetime(pub_date_str)
         return (datetime.now(timezone.utc) - dt).total_seconds() / 86400
     except Exception:
         return None
+
+
+def get_fresh_tag(age_days: float | None) -> str | None:
+    """Return the appropriate freshness tag for the given age, or None if too old."""
+    if age_days is None:
+        return None
+    for max_days, tag in sorted(TIERS, key=lambda t: t[0]):
+        if age_days <= max_days:
+            return tag
+    return None
 
 
 def is_torrent(item: dict) -> bool:
@@ -42,9 +57,9 @@ def process_usenet(items: list[dict]) -> list[dict]:
     for item in items:
         if is_torrent(item):
             continue
-        age = item.get("age")
-        if age is not None and age <= FRESH_DAYS:
-            item["title"] = tag_title(item["title"], FRESH_TAG)
+        tag = get_fresh_tag(item.get("age"))
+        if tag:
+            item["title"] = tag_title(item["title"], tag)
         result.append(item)
     return result
 
@@ -165,6 +180,7 @@ async def search_indexer(client: httpx.AsyncClient, indexer_id: int, params: dic
             imdb_id = None
             tvdb_id = None
             categories = []
+            usenet_age = None  # age in days from newznab attr, more reliable than pubDate
 
             enclosure = entry.find("enclosure")
             if enclosure is not None:
@@ -195,6 +211,11 @@ async def search_indexer(client: httpx.AsyncClient, indexer_id: int, params: dic
                         categories.append({"id": int(value)})
                     except ValueError:
                         pass
+                elif name in ("usenetage", "age"):
+                    try:
+                        usenet_age = float(value)
+                    except ValueError:
+                        pass
 
             for attr_el in entry.findall("{http://torznab.com/schemas/2015/feed}attr"):
                 name = attr_el.get("name", "")
@@ -209,6 +230,9 @@ async def search_indexer(client: httpx.AsyncClient, indexer_id: int, params: dic
             if download_url.endswith(".torrent") or "magnet:" in download_url:
                 protocol = "torrent"
 
+            # Prefer usenetage attr over computed pubDate age (more accurate)
+            age = usenet_age if usenet_age is not None else _age_days_from_pubdate(pub_date)
+
             items.append({
                 "title": title,
                 "downloadUrl": magnet_url if magnet_url and not download_url else download_url,
@@ -221,7 +245,7 @@ async def search_indexer(client: httpx.AsyncClient, indexer_id: int, params: dic
                 "imdbId": imdb_id,
                 "tvdbId": tvdb_id,
                 "categories": categories,
-                "age": _age_days(pub_date),
+                "age": age,
             })
         return items
     except Exception:
